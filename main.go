@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"strings"
 )
 
 var pathFlag = flag.String("path", "", "put your full alembic migrations path here, like ./alembic/versions")
@@ -18,6 +19,12 @@ func main() {
 
 	if pathFlag == nil || *pathFlag == "" {
 		panic("path is empty")
+	}
+
+	path := *pathFlag
+
+	if !strings.HasSuffix(path, "/") {
+		path += "/"
 	}
 
 	files, err := ioutil.ReadDir(*pathFlag)
