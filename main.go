@@ -2,12 +2,12 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"github.com/xlab/treeprint"
 	"io/fs"
 	"io/ioutil"
 	"log"
 	"os"
+	"regexp"
 	"strings"
 )
 
@@ -18,7 +18,7 @@ func main() {
 	flag.Parse()
 
 	if pathFlag == nil || *pathFlag == "" {
-		panic("path is empty")
+		log.Fatal("path flag is empty")
 	}
 
 	path := *pathFlag
@@ -27,21 +27,48 @@ func main() {
 		path += "/"
 	}
 
-	files, err := ioutil.ReadDir(*pathFlag)
+	files, err := ioutil.ReadDir(path)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("error reading dir: %v", err)
 	}
 
-	var migrations []Migration
+	var migrationsByHeader, migrationsActual []Migration
 
 	for _, f := range files {
-		migrations = append(migrations, parseHeader(*pathFlag, f))
+		if !f.IsDir() {
+			mh, ma := parse(path, f)
+			migrationsByHeader = append(migrationsByHeader, mh)
+			migrationsActual = append(migrationsActual, ma)
+		}
 	}
 
-	mtree := buildTree(migrations)
+	mTreeHeader := buildTree(migrationsByHeader, "header")
 
-	tree := convertToTreeprint(mtree)
-	fmt.Println(tree.String())
+	mTreeActual := buildTree(migrationsActual, "actual")
+
+	headerTreeStr := convertToTreeprint(mTreeHeader).String()
+
+	actualTreeStr := convertToTreeprint(mTreeActual).String()
+
+	log.Println(buildPrintString(headerTreeStr, actualTreeStr))
+
+	if headerTreeStr != actualTreeStr {
+		log.Fatalf("Trees are not equal")
+	} else {
+		log.Println("Trees are equal")
+	}
+}
+
+func buildPrintString(hs, as string) string {
+	var s strings.Builder
+
+	s.WriteString("\n--------------------HEADER-TREE-------------------\n")
+	s.WriteString(hs)
+	s.WriteString("\n--------------------ACTUAL-TREE-------------------\n")
+	s.WriteString(as)
+	s.WriteString("\n--------------------------------------------------\n")
+
+	return s.String()
 }
 
 type Migration struct {
@@ -82,41 +109,90 @@ func getAfterLastSpace(c string) string {
 	return c[id+1:]
 }
 
-func parseHeader(path string, file fs.FileInfo) Migration {
-	contentBytes, err := os.ReadFile(path + file.Name())
-	if err != nil {
-		panic(err)
+var (
+	nameExp           = regexp.MustCompile(`^"""(.+)\n`)
+	revisionHeaderExp = regexp.MustCompile(`Revision ID:\ *(.+)\n`)
+	revisesExp        = regexp.MustCompile(`Revises:\ *(.+)\n`)
+	dateExp           = regexp.MustCompile(`Create Date:\ *(.+)\n`)
+)
+
+func parseHeader(filename, content string) Migration {
+	names := nameExp.FindStringSubmatch(content)
+
+	var name string
+	if len(names) == 2 {
+		name = names[1]
 	}
 
-	content := string(contentBytes)
-	content = content[3:]
+	revisions := revisionHeaderExp.FindStringSubmatch(content)
+	if revisions == nil || len(revisions) == 0 || len(revisions) != 2 {
+		log.Fatalf("no revision found or more than one in {%s}: %v", filename, revisions)
+	}
 
-	name, nextId := getTillNL(content)
+	downRevisions := revisesExp.FindStringSubmatch(content)
+	if len(downRevisions) > 2 {
+		log.Fatalf("more than one down_revision found in {%s}: %v", filename, downRevisions)
+	}
 
-	content = content[nextId+2:]
+	var downRevision *string
+	if len(downRevisions) == 2 && strings.Trim(downRevisions[1], " \n\t") != "" {
+		downRevision = &downRevisions[1]
+	}
 
-	revisionIDStr, nextId := getTillNL(content)
-
-	revisionID := getAfterLastSpace(revisionIDStr)
-
-	content = content[nextId+1:]
-
-	revisesStr, nextId := getTillNL(content)
-
-	revises := getAfterLastSpace(revisesStr)
-
-	content = content[nextId+1:]
-
-	dateStr, nextId := getTillNL(content)
-
-	date := getAfterLastSpace(dateStr)
+	dates := dateExp.FindStringSubmatch(content)
+	if dates == nil || len(dates) == 0 || len(dates) != 2 {
+		log.Fatalf("no date found or more than one in {%s}: %v", filename, dates)
+	}
 
 	return Migration{
 		Name:       name,
-		RevisionID: revisionID,
-		Revises:    &revises,
+		RevisionID: revisions[1],
+		Revises:    downRevision,
+		Date:       dates[1],
+	}
+}
+
+var revisionExp = regexp.MustCompile(`revision\ *=\ *"(.+)"`)
+
+var downExp = regexp.MustCompile(`down_revision\ *=\ *"(.+)"`)
+
+func parseActual(filename, content, name, date string) Migration {
+	revisions := revisionExp.FindStringSubmatch(content)
+	if revisions == nil || len(revisions) == 0 || len(revisions) != 2 {
+		log.Fatalf("no revision found or more than one in {%s}: %v", filename, revisions)
+	}
+
+	downRevisions := downExp.FindStringSubmatch(content)
+	if len(downRevisions) > 2 {
+		log.Fatalf("more than one down_revision found in {%s}: %v", filename, downRevisions)
+	}
+
+	var downRevision *string
+	if len(downRevisions) == 2 {
+		downRevision = &downRevisions[1]
+	}
+
+	return Migration{
+		Name:       name,
+		RevisionID: revisions[1],
+		Revises:    downRevision,
 		Date:       date,
 	}
+}
+
+func parse(path string, file fs.FileInfo) (header, actual Migration) {
+	contentBytes, err := os.ReadFile(path + file.Name())
+	if err != nil {
+		log.Fatalf("error reading file: %v", err)
+	}
+
+	content := string(contentBytes)
+
+	header = parseHeader(file.Name(), content)
+
+	actual = parseActual(file.Name(), content, header.Name, header.Date)
+
+	return header, actual
 }
 
 func buildTreeRec(parent *MigrationTree, others []Migration) *MigrationTree {
@@ -140,8 +216,7 @@ func buildTreeRec(parent *MigrationTree, others []Migration) *MigrationTree {
 	return buildTreeRec(parent.Parent, others)
 }
 
-func buildTree(m []Migration) *MigrationTree {
-	// let's find root
+func buildTree(m []Migration, parseType string) *MigrationTree {
 	var root *MigrationTree
 	for i := range m {
 		if m[i].Revises == nil || *m[i].Revises == "" {
@@ -158,7 +233,7 @@ func buildTree(m []Migration) *MigrationTree {
 	}
 
 	if root == nil {
-		panic("no root found")
+		log.Fatalf("no root found, parse type: %v", parseType)
 	}
 
 	buildTreeRec(root, m)
@@ -167,15 +242,25 @@ func buildTree(m []Migration) *MigrationTree {
 }
 
 func convertToTreeprintRec(root *MigrationTree, tree treeprint.Tree) {
+	if len(root.Children) == 0 {
+		return
+	}
+
+	if len(root.Children) == 1 {
+		convertToTreeprintRec(root.Children[0], tree.AddMetaNode(root.Children[0].M.RevisionID, root.Children[0].M.Name))
+
+		return
+	}
+
 	for i := range root.Children {
-		convertToTreeprintRec(root.Children[i], tree.AddMetaBranch(root.Children[i].M.RevisionID, root.Children[i].M.Name))
+		convertToTreeprintRec(root.Children[i], tree.FindLastNode().AddMetaBranch(root.Children[i].M.RevisionID, root.Children[i].M.Name))
 	}
 }
 
 func convertToTreeprint(root *MigrationTree) treeprint.Tree {
 	tree := treeprint.New()
 
-	convertToTreeprintRec(root, tree.AddMetaBranch(root.M.RevisionID, root.M.Name))
+	convertToTreeprintRec(root, tree.AddMetaNode(root.M.RevisionID, root.M.Name))
 
 	return tree
 }
