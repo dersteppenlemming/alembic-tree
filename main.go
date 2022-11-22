@@ -13,12 +13,18 @@ import (
 
 var pathFlag = flag.String("path", "", "put your full alembic migrations path here, like ./alembic/versions")
 
-func main() {
+var softFlag = flag.Bool("soft", false, "soft mode doesn't fail if trees are not equal")
 
+func main() {
 	flag.Parse()
 
 	if pathFlag == nil || *pathFlag == "" {
 		log.Fatal("path flag is empty")
+	}
+
+	soft := false
+	if softFlag != nil {
+		soft = *softFlag
 	}
 
 	path := *pathFlag
@@ -53,10 +59,37 @@ func main() {
 	log.Println(buildPrintString(headerTreeStr, actualTreeStr))
 
 	if headerTreeStr != actualTreeStr {
-		log.Fatalf("Trees are not equal")
+		if soft {
+			log.Println("trees are not equal")
+		} else {
+			log.Fatal("trees are not equal")
+		}
 	} else {
 		log.Println("Trees are equal")
 	}
+
+	if !isList(mTreeActual) {
+		log.Fatal("actual tree is not a linked list")
+	} else {
+		log.Println("actual tree is a linked list")
+	}
+}
+
+func isList(tree *MigrationTree) bool {
+	curTree := tree
+	for {
+		if curTree == nil || curTree.Children == nil {
+			break
+		}
+
+		if len(curTree.Children) > 1 {
+			return false
+		}
+
+		curTree = curTree.Children[0]
+	}
+
+	return true
 }
 
 func buildPrintString(hs, as string) string {
